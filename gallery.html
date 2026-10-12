@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#201b1a">
+<title>P ♥ P | Shared Memories</title>
+<style>
+:root{--gold:#d8b78b;--cream:#fff5e8;--ink:#201b1a}*{box-sizing:border-box}body{margin:0;background:#100f10;color:var(--cream);font-family:system-ui,sans-serif}.app{max-width:900px;margin:auto;min-height:100dvh;background:var(--ink);padding:18px 12px 45px}header{text-align:center;font-family:Georgia,serif;border-bottom:1px solid #695440;padding-bottom:15px}header .mark{font-size:30px;letter-spacing:5px;color:var(--gold)}h1{font-size:21px;letter-spacing:3px;font-weight:400;margin:5px 0}header p{font:11px system-ui;letter-spacing:3px;color:var(--gold)}nav{display:flex;align-items:center;justify-content:space-between;padding:16px 3px}a,button{color:var(--gold);font:13px system-ui}a{text-decoration:none}button{border:1px solid #80684e;border-radius:20px;padding:9px 15px;background:transparent;cursor:pointer}button:disabled{opacity:.5}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px}@media(min-width:700px){.grid{grid-template-columns:repeat(5,minmax(0,1fr));gap:5px}}.tile{position:relative;aspect-ratio:1;border:0;padding:0;border-radius:3px;overflow:hidden;background:#463b33;display:grid;place-items:center;color:var(--cream)}.tile img{height:100%;width:100%;object-fit:cover}.tile .play{position:absolute;right:6px;top:5px;color:white;text-shadow:0 1px 4px #000;font-size:16px}.placeholder{font-size:23px}.status{text-align:center;color:#b9aa9a;font-size:13px;padding:18px}.more{display:block;margin:8px auto 16px}.overlay{position:fixed;inset:0;z-index:5;background:#0d0c0ceF;display:none;flex-direction:column;align-items:center;justify-content:center;padding:16px}.overlay.open{display:flex}.overlay .close{position:absolute;top:12px;right:14px;font-size:22px}.overlay img,.overlay video{max-width:100%;max-height:75dvh;object-fit:contain}.details{text-align:center;color:var(--gold);font-size:13px;padding:12px}.note{font-size:12px;color:#b9aa9a;text-align:center;margin:14px}
+</style>
+</head>
+<body><main class="app"><header><div class="mark">P ♥ P</div><h1>PAMELA &amp; PAOLO</h1><p>OUR SHARED MEMORIES</p></header>
+<nav><a href="index.html">← Capture memories</a><button id="refresh">↻ Refresh</button></nav>
+<div id="grid" class="grid" aria-label="Approved guest uploads"></div><div id="status" class="status" role="status">Loading approved memories…</div><button class="more" id="more" hidden>Load more</button>
+<p class="note">Only approved memories appear here. Uploads may take time to review.</p></main>
+<div class="overlay" id="viewer" role="dialog" aria-modal="true" aria-label="Memory viewer"><button class="close" id="close" aria-label="Close">✕</button><div id="media"></div><div id="details" class="details"></div></div>
+<script>
+'use strict';
+const ENDPOINT='https://script.google.com/macros/s/AKfycbxX1H_X1-rVTGrWifhA_bM8P9bU2yQy4EURyhqbgK4e4yRQuAYXXUkGMf_xuovsRLs_1A/exec';
+const $=id=>document.getElementById(id);
+let offset=0, loading=false;
+// Apps Script serves an HTML iframe, which posts the requested data to this page.
+// No guest is given direct permission to browse the private Drive folder.
+function request(params){return new Promise((resolve,reject)=>{
+ const nonce='g'+Date.now()+'_'+Math.random().toString(36).slice(2);
+ const frame=document.createElement('iframe');frame.hidden=true;
+ let finished=false;
+ const timer=setTimeout(()=>finish(Error('Gallery request timed out.')),45000);
+ function finish(err,data){if(finished)return;finished=true;clearTimeout(timer);window.removeEventListener('message',receive);frame.remove();err?reject(err):resolve(data)}
+ function receive(e){if(e.source!==frame.contentWindow)return;if(e.origin!=='null'&&!/^https:\/\/(script\.google\.com|[a-z0-9-]+\.googleusercontent\.com)$/.test(e.origin))return;const d=e.data;if(!d||d.kind!=='pp-gallery'||d.nonce!==nonce)return;finish(d.ok?null:Error(d.error||'Unable to load gallery.'),d)}
+ window.addEventListener('message',receive);
+ frame.src=ENDPOINT+'?'+new URLSearchParams({...params,nonce}).toString();document.body.append(frame);
+})}
+async function load(reset=false){if(loading)return;loading=true;$('more').hidden=true;if(reset){offset=0;$('grid').replaceChildren()}$('status').textContent='Loading memories…';try{
+ const data=await request({action:'gallery',offset});for(const item of data.items){const button=document.createElement('button');button.className='tile';button.title='Memory by '+item.guest;button.setAttribute('aria-label','Open memory by '+item.guest);if(item.thumb){const img=document.createElement('img');img.src=item.thumb;img.loading='lazy';img.alt='';button.append(img)}else{const placeholder=document.createElement('span');placeholder.className='placeholder';placeholder.textContent=item.mime.startsWith('video/')?'▶':'♡';button.append(placeholder)}if(item.mime.startsWith('video/')){const play=document.createElement('span');play.className='play';play.textContent='▶';button.append(play)}button.onclick=()=>openMemory(item);$('grid').append(button)}
+ offset=data.nextOffset===null?offset+data.items.length:data.nextOffset;$('more').hidden=data.nextOffset===null;$('status').textContent=$('grid').children.length?'Showing '+$('grid').children.length+' approved memories':'No approved memories yet.';
+ }catch(err){$('status').textContent=String(err.message||err)}finally{loading=false}}
+async function openMemory(item){$('viewer').classList.add('open');$('media').replaceChildren();$('details').textContent='Loading memory by '+item.guest+'…';try{const d=await request({action:'media',id:item.id});const blob=base64Blob(d.data,d.mime);const url=URL.createObjectURL(blob);const media=document.createElement(d.mime.startsWith('video/')?'video':'img');media.src=url;if(media.tagName==='VIDEO'){media.controls=true;media.playsInline=true}media.onload=media.onloadedmetadata=()=>{};$('media').append(media);$('viewer').dataset.url=url;$('details').textContent='Uploaded by '+item.guest;}catch(err){$('details').textContent=String(err.message||err)}}
+function base64Blob(raw,mime){const bytes=atob(raw),chunks=[];for(let i=0;i<bytes.length;i+=32768){const part=bytes.slice(i,i+32768),arr=new Uint8Array(part.length);for(let j=0;j<part.length;j++)arr[j]=part.charCodeAt(j);chunks.push(arr)}return new Blob(chunks,{type:mime})}
+$('close').onclick=()=>{const v=$('viewer');v.classList.remove('open');$('media').replaceChildren();if(v.dataset.url)URL.revokeObjectURL(v.dataset.url);delete v.dataset.url};$('more').onclick=()=>load();$('refresh').onclick=()=>load(true);load(true);
+</script></body></html>
