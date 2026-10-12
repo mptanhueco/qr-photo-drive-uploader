@@ -11,8 +11,8 @@
 </head>
 <body><main class="app"><header><div class="mark">P ♥ P</div><h1>PAMELA &amp; PAOLO</h1><p>OUR SHARED MEMORIES</p></header>
 <nav><a href="index.html">← Capture memories</a><button id="refresh">↻ Refresh</button></nav>
-<div id="grid" class="grid" aria-label="Approved guest uploads"></div><div id="status" class="status" role="status">Loading approved memories…</div><button class="more" id="more" hidden>Load more</button>
-<p class="note">Only approved memories appear here. Uploads may take time to review.</p></main>
+<div id="grid" class="grid" aria-label="Shared guest uploads"></div><div id="status" class="status" role="status">Loading shared memories…</div><button class="more" id="more" hidden>Load more</button>
+<p class="note">Photos and videos appear after a successful upload. Anyone with the gallery link can view them.</p></main>
 <div class="overlay" id="viewer" role="dialog" aria-modal="true" aria-label="Memory viewer"><button class="close" id="close" aria-label="Close">✕</button><div id="media"></div><div id="details" class="details"></div></div>
 <script>
 'use strict';
@@ -33,7 +33,7 @@ function request(params){return new Promise((resolve,reject)=>{
 })}
 async function load(reset=false){if(loading)return;loading=true;$('more').hidden=true;if(reset){offset=0;$('grid').replaceChildren()}$('status').textContent='Loading memories…';try{
  const data=await request({action:'gallery',offset});for(const item of data.items){const button=document.createElement('button');button.className='tile';button.title='Memory by '+item.guest;button.setAttribute('aria-label','Open memory by '+item.guest);if(item.thumb){const img=document.createElement('img');img.src=item.thumb;img.loading='lazy';img.alt='';button.append(img)}else{const placeholder=document.createElement('span');placeholder.className='placeholder';placeholder.textContent=item.mime.startsWith('video/')?'▶':'♡';button.append(placeholder)}if(item.mime.startsWith('video/')){const play=document.createElement('span');play.className='play';play.textContent='▶';button.append(play)}button.onclick=()=>openMemory(item);$('grid').append(button)}
- offset=data.nextOffset===null?offset+data.items.length:data.nextOffset;$('more').hidden=data.nextOffset===null;$('status').textContent=$('grid').children.length?'Showing '+$('grid').children.length+' approved memories':'No approved memories yet.';
+ offset=data.nextOffset===null?offset+data.items.length:data.nextOffset;$('more').hidden=data.nextOffset===null;$('status').textContent=$('grid').children.length?'Showing '+$('grid').children.length+' shared memories':'No shared memories yet.';
  }catch(err){$('status').textContent=String(err.message||err)}finally{loading=false}}
 async function openMemory(item){$('viewer').classList.add('open');$('media').replaceChildren();$('details').textContent='Loading memory by '+item.guest+'…';try{const d=await request({action:'media',id:item.id});const blob=base64Blob(d.data,d.mime);const url=URL.createObjectURL(blob);const media=document.createElement(d.mime.startsWith('video/')?'video':'img');media.src=url;if(media.tagName==='VIDEO'){media.controls=true;media.playsInline=true}media.onload=media.onloadedmetadata=()=>{};$('media').append(media);$('viewer').dataset.url=url;$('details').textContent='Uploaded by '+item.guest;}catch(err){$('details').textContent=String(err.message||err)}}
 function base64Blob(raw,mime){const bytes=atob(raw),chunks=[];for(let i=0;i<bytes.length;i+=32768){const part=bytes.slice(i,i+32768),arr=new Uint8Array(part.length);for(let j=0;j<part.length;j++)arr[j]=part.charCodeAt(j);chunks.push(arr)}return new Blob(chunks,{type:mime})}
