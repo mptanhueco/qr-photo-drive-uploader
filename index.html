@@ -6,7 +6,7 @@ const ENDPOINT='https://script.google.com/macros/s/AKfycbxX1H_X1-rVTGrWifhA_bM8P
 const MAX=4*1024*1024,LIMIT_MS=15000,PHOTO=['image/jpeg','image/png','image/webp','image/heic','image/heif'],VIDEO=['video/webm','video/mp4','video/quicktime'];
 const $=id=>document.getElementById(id),queue=[];let stream=null,facing='environment',mode='photo',busy=false,done=0,seq=0,recorder=null,chunks=[],stopTimer=null,recordStart=0,zoomValue=1,baseWidth=0;
 const notice=s=>$('status').textContent=s;
-function render(){let pending=queue.filter(q=>['preparing','queued','uploading'].includes(q.state)).length,failed=queue.filter(q=>q.state==='failed').length;$('count').textContent=`${done} uploaded · ${pending} pending${failed?' · '+failed+' failed':''}`;const box=$('thumbs');box.replaceChildren();if(!queue.length)box.textContent='Your memories appear here.';queue.forEach(q=>{let tile=document.createElement('div');tile.className='tile';let med=document.createElement(q.video?'video':'img');med.src=q.url;if(q.video){med.muted=true;med.playsInline=true;med.preload='metadata';}tile.append(med);let label=document.createElement('span');label.textContent=({preparing:'Preparing…',queued:'Queued',uploading:'Uploading…',uploaded:'✓ Shared',failed:'Failed'})[q.state];tile.append(label);if(q.state==='failed'){const b=document.createElement('button');b.textContent='Retry';b.onclick=()=>{q.state='queued';render();pump()};tile.append(b)}box.append(tile)});if(queue.length&&!pending&&!failed)notice('✓ All memories uploaded. Thank you!');}
+function render(){let pending=queue.filter(q=>['preparing','queued','uploading','verifying','uncertain'].includes(q.state)).length,failed=queue.filter(q=>q.state==='failed').length;$('count').textContent=`${done} uploaded · ${pending} pending${failed?' · '+failed+' failed':''}`;const box=$('thumbs');box.replaceChildren();if(!queue.length)box.textContent='Your memories appear here.';queue.forEach(q=>{let tile=document.createElement('div');tile.className='tile';let med=document.createElement(q.video?'video':'img');med.src=q.url;if(q.video){med.muted=true;med.playsInline=true;med.preload='metadata';}tile.append(med);let label=document.createElement('span');label.textContent=({preparing:'Preparing…',queued:'Queued',uploading:'Uploading…',uploaded:'✓ Shared',verifying:'Verifying…',uncertain:'Check status',failed:'Failed'})[q.state];tile.append(label);if(q.state==='failed'||q.state==='uncertain'){const b=document.createElement('button');b.textContent=q.state==='uncertain'?'Check status':'Retry';b.onclick=()=>{if(q.state==='uncertain'){checkUncertain(q)}else{q.state='queued';render();pump()}};tile.append(b)}box.append(tile)});if(queue.length&&!pending&&!failed)notice('✓ All memories uploaded. Thank you!');}
 async function thumbnailFor(file) {
   if (!['image/jpeg','image/png','image/webp'].includes(file.type)) return '';
   const url = URL.createObjectURL(file);
@@ -21,8 +21,66 @@ async function thumbnailFor(file) {
   } catch (_) { return ''; } finally { URL.revokeObjectURL(url); }
 }
 function addFiles(files){for(let file of files){let video=VIDEO.includes(file.type);if(!PHOTO.includes(file.type)&&!video){notice(file.name+': unsupported format.');continue}if(!file.size||file.size>MAX){notice(file.name+': over the 4 MB limit. Please use a shorter video or smaller photo.');continue}const item={id:++seq,file,video,guest:$('guest').value.trim(),url:URL.createObjectURL(file),thumb:'',state:'preparing'};queue.push(item);thumbnailFor(file).then(t=>{item.thumb=t;item.state='queued';render();pump()})}render();pump()}
-function send(q){return new Promise((resolve,reject)=>{if(!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(ENDPOINT))return reject(Error('Check backend URL.'));let nonce='q'+Date.now()+'_'+q.id+'_'+Math.random().toString(36).slice(2),frame=document.createElement('iframe');frame.name='upload_'+nonce;frame.hidden=true;document.body.append(frame);let form=document.createElement('form');form.action=ENDPOINT;form.method='POST';form.target=frame.name;form.enctype='application/x-www-form-urlencoded';form.style.display='none';for(let [k,v] of Object.entries({nonce,mime:q.file.type,guest:q.guest,photo:'',thumb:q.thumb||''})){let f=document.createElement('input');f.name=k;f.value=v;form.append(f)}document.body.append(form);let settled=false;function cleanup(){clearTimeout(timeout);window.removeEventListener('message',listen);frame.remove();form.remove()}function finish(err,data){if(settled)return;settled=true;cleanup();err?reject(err):resolve(data)}function listen(ev){if(ev.origin!=='null'&&!/^https:\/\/(script\.google\.com|[a-z0-9-]+\.googleusercontent\.com)$/.test(ev.origin))return;let d=ev.data;if(!d||d.kind!=='instant-memory-upload'||d.nonce!==nonce)return;finish(d.ok?null:Error(d.error||'Upload failed'),d)}window.addEventListener('message',listen);let timeout=setTimeout(()=>finish(Error('Confirmation timed out. Check Drive before retrying to avoid duplicates.')),120000);let reader=new FileReader();reader.onerror=()=>finish(Error('Could not read file.'));reader.onload=()=>{if(settled)return;form.elements.namedItem('photo').value=String(reader.result).split(',')[1]||'';try{form.submit()}catch(e){finish(e)}};reader.readAsDataURL(q.file)})}
-async function pump(){if(busy)return;let q=queue.find(x=>x.state==='queued');if(!q)return;busy=true;q.state='uploading';render();notice('Uploading in the background. Keep shooting!');try{await send(q);q.state='uploaded';done++}catch(err){q.state='failed';notice(String(err.message||err)+' Tap Retry if needed.')}finally{busy=false;render();pump()}}
+function bridgeRequest(fields, kind, timeoutMs=120000){
+  return new Promise((resolve,reject)=>{
+    const nonce=fields.nonce, frame=document.createElement('iframe');
+    frame.name='bridge_'+nonce;frame.hidden=true;document.body.append(frame);
+    let form=null,settled=false;
+    function cleanup(){clearTimeout(timer);window.removeEventListener('message',listen);frame.remove();form?.remove()}
+    function finish(err,data){if(settled)return;settled=true;cleanup();err?reject(err):resolve(data)}
+    function listen(ev){
+      if(ev.origin!=='null'&&!/^https:\/\/(script\.google\.com|[a-z0-9-]+\.googleusercontent\.com)$/.test(ev.origin))return;
+      const d=ev.data;
+      if(!d||d.kind!==kind||d.nonce!==nonce)return;
+      finish(d.ok?null:Error(d.error||'Request failed'),d);
+    }
+    window.addEventListener('message',listen);
+    const timer=setTimeout(()=>finish(Error('Confirmation timed out.')),timeoutMs);
+    if(fields.action==='status'){
+      const url=new URL(ENDPOINT);Object.entries(fields).forEach(([k,v])=>url.searchParams.set(k,v));frame.src=url.toString();
+    }else{
+      form=document.createElement('form');form.action=ENDPOINT;form.method='POST';form.target=frame.name;form.enctype='application/x-www-form-urlencoded';form.hidden=true;
+      Object.entries(fields).filter(([k])=>k!=='_file').forEach(([k,v])=>{const input=document.createElement('input');input.name=k;input.value=v;form.append(input)});
+      document.body.append(form);
+      const reader=new FileReader();reader.onerror=()=>finish(Error('Could not read file.'));
+      reader.onload=()=>{if(settled)return;form.elements.namedItem('photo').value=String(reader.result).split(',')[1]||'';try{form.submit()}catch(err){finish(err)}};
+      reader.readAsDataURL(fields._file); // Remove the File from serialized fields below.
+    }
+  });
+}
+function newToken(){return 'p'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,14)}
+async function checkStatus(q){
+  const requestNonce=newToken();
+  return bridgeRequest({action:'status',nonce:requestNonce,uploadId:q.uploadId},'pp-upload-status',25000);
+}
+async function checkUncertain(q){
+  q.state='verifying';render();notice('Checking Google Drive before allowing a retry…');
+  try{
+    const response=await checkStatus(q);
+    if(response.found){q.state='uploaded';done++;notice('✓ Found in Google Drive. No duplicate upload needed.');}
+    else {q.state='uncertain';notice('Not confirmed in Drive. Check Drive manually before retrying; the original upload may still be finishing.');}
+  }catch(err){q.state='uncertain';notice('Could not verify upload. Keep this page open and check Drive manually.');}
+  render();
+}
+async function send(q){
+  if(!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(ENDPOINT))throw Error('Check backend URL.');
+  q.uploadId ||= newToken();
+  return bridgeRequest({nonce:q.uploadId,mime:q.file.type,guest:q.guest,photo:'',thumb:q.thumb||'',_file:q.file},'instant-memory-upload');
+}
+async function pump(){
+  if(busy)return;
+  const q=queue.find(x=>x.state==='queued');if(!q)return;
+  busy=true;q.state='uploading';render();notice('Uploading in the background. Keep shooting!');
+  try {await send(q);q.state='uploaded';done++;}
+  catch(err){
+    q.state='verifying';render();notice('Upload confirmation delayed. Checking Google Drive…');
+    try{
+      const status=await checkStatus(q);
+      if(status.found){q.state='uploaded';done++;notice('✓ Saved to Google Drive (confirmation recovered).');}
+      else {q.state='uncertain';notice('Could not confirm yet. Check status before retrying.');}
+    }catch(_){q.state='uncertain';notice('Verification unavailable. Check Drive before retrying.');}
+  }finally{busy=false;render();pump()}
+}
 function stopStream(){if(stream)stream.getTracks().forEach(t=>t.stop());stream=null}
 async function startCamera(){if(!navigator.mediaDevices?.getUserMedia){notice('Live camera unavailable. Use Phone Camera.');return}try{if(recorder&&recorder.state==='recording')stopRecording();stopStream();stream=await navigator.mediaDevices.getUserMedia({audio:mode==='video',video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:720}}});let v=$('preview');v.srcObject=stream;await v.play();v.style.display='block';v.classList.toggle('mirror',facing==='user');$('placeholder').style.display='none';$('flip').style.display='block';$('shutter').disabled=false;await setupZoom();notice('Camera ready. '+(mode==='photo'?'Tap the shutter to take a photo.':'Tap the red shutter to record up to 15 seconds.'))}catch(err){notice('Camera unavailable or microphone denied. Use the Phone Camera fallback.')}}
 async function setupZoom(){let track=stream?.getVideoTracks()[0],cap=track?.getCapabilities?.();let el=$('zoom');if(cap?.zoom){el.style.display='flex';$('zoomSlider').min=cap.zoom.min;$('zoomSlider').max=cap.zoom.max;$('zoomSlider').step=cap.zoom.step||.1;zoomValue=Math.max(cap.zoom.min,Math.min(cap.zoom.max,1));$('zoomSlider').value=zoomValue;await applyZoom(zoomValue)}else{el.style.display='none';zoomValue=1}}
@@ -43,6 +101,6 @@ function captureFeedback(){
 function snap(){let v=$('preview');if(!stream||!v.videoWidth)return;let c=document.createElement('canvas'),s=Math.min(1,1600/Math.max(v.videoWidth,v.videoHeight));c.width=Math.round(v.videoWidth*s);c.height=Math.round(v.videoHeight*s);let ctx=c.getContext('2d');if(facing==='user'){ctx.translate(c.width,0);ctx.scale(-1,1)}ctx.drawImage(v,0,0,c.width,c.height);c.toBlob(b=>{if(b){captureFeedback();addFiles([new File([b],`PP_photo_${Date.now()}.jpg`,{type:'image/jpeg'})]);notice('✓ Photo captured — preparing upload. Keep shooting!')}else notice('Photo capture failed.')},'image/jpeg',.82)}
 function startRecording(){if(!stream||!window.MediaRecorder){notice('Video recording unsupported here. Try Phone Camera instead.');return}let types=['video/mp4','video/webm;codecs=vp8,opus','video/webm'];let mime=types.find(t=>MediaRecorder.isTypeSupported(t));if(!mime){notice('Video encoder unavailable. Use Phone Camera.');return}chunks=[];try{recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:1100000,audioBitsPerSecond:64000})}catch(e){notice('Video recording could not start.');return}let thisRecorder=recorder;thisRecorder.ondataavailable=e=>{if(e.data?.size)chunks.push(e.data)};thisRecorder.onerror=()=>notice('Recording error. Please try again.');thisRecorder.onstop=()=>{clearInterval(stopTimer);$('timer').style.display='none';$('shutter').classList.remove('recording');let type=thisRecorder.mimeType.split(';')[0],blob=new Blob(chunks,{type});chunks=[];if(blob.size){addFiles([new File([blob],`PP_video_${Date.now()}.${type==='video/mp4'?'mp4':'webm'}`,{type})])}else notice('No video was recorded.')};thisRecorder.start(250);recordStart=Date.now();$('timer').style.display='block';$('shutter').classList.add('recording');stopTimer=setInterval(()=>{let elapsed=Date.now()-recordStart;$('timer').textContent=`● 0:${String(Math.floor(elapsed/1000)).padStart(2,'0')} / 0:15`;if(elapsed>=LIMIT_MS||chunks.reduce((n,b)=>n+b.size,0)>MAX-350000)stopRecording()},160)}
 function stopRecording(){if(recorder?.state==='recording')recorder.stop();clearInterval(stopTimer)}$('shutter').onclick=()=>{if(mode==='photo')snap();else if(recorder?.state==='recording')stopRecording();else startRecording()};$('galleryPicker').onclick=()=>$('files').click();$('native').onclick=() => $(mode==='photo'?'nativePhoto':'nativeVideo').click();for(let id of ['files','nativePhoto','nativeVideo'])$(id).onchange=e=>{let files=[...(e.target.files||[])];e.target.value='';addFiles(files)};
-$('retryAll').onclick=()=>{queue.filter(q=>q.state==='failed').forEach(q=>q.state='queued');render();pump()};$('viewUploads').onclick=()=>{if(queue.some(q=>['queued','uploading','preparing'].includes(q.state))){notice('Finish your uploads before leaving for the shared gallery.');return}location.href='gallery.html'};
-window.addEventListener('beforeunload',e=>{if(queue.some(q=>['preparing','queued','uploading'].includes(q.state))){e.preventDefault();e.returnValue='Uploads still pending.'}});render();
+$('retryAll').onclick=()=>{queue.filter(q=>q.state==='failed').forEach(q=>q.state='queued');queue.filter(q=>q.state==='uncertain').forEach(q=>checkUncertain(q));render();pump()};$('viewUploads').onclick=()=>{if(queue.some(q=>['queued','uploading','preparing'].includes(q.state))){notice('Finish your uploads before leaving for the shared gallery.');return}location.href='gallery.html'};
+window.addEventListener('beforeunload',e=>{if(queue.some(q=>['preparing','queued','uploading','verifying','uncertain'].includes(q.state))){e.preventDefault();e.returnValue='Uploads still pending.'}});render();
 </script></body></html>
